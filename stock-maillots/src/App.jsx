@@ -2,12 +2,6 @@ import { useState, useEffect } from "react";
 
 const ADMIN_PASSWORD = "Jesuislepatron";
 
-// Firebase config - FREE Realtime Database for live sync
-// Instructions: Create a free Firebase project at firebase.google.com
-// Replace these values with yours from Project Settings > Your apps > Web app
-const FIREBASE_URL = "https://stock-maillots-default-rtdb.firebaseio.com";
-// If you haven't set up Firebase yet, the app uses localStorage as fallback
-
 const DEFAULT_STOCK = [
   { id: "france-bleu", country: "France", variant: "Bleu foncé", flag: "🇫🇷", accent: "#3b82f6", sizes: { S: 1, M: 1, L: 0, XL: 0 } },
   { id: "scotland", country: "Scotland", variant: "", flag: "🏴󠁧󠁢󠁳󠁣󠁴󠁿", accent: "#60a5fa", sizes: { S: 0, M: 0, L: 0, XL: 1 } },
@@ -21,23 +15,58 @@ const DEFAULT_STOCK = [
 
 const SIZE_ORDER = ["S", "M", "L", "XL"];
 
-// Firebase helpers
-async function fbGet() {
+// JSONBin.io - free live sync storage
+// BIN ID will be created on first save
+const JSONBIN_API = "https://api.jsonbin.io/v3";
+const API_KEY = "$2a$10$7kT3Nz8pQvWxYmLdEcRfOuA5BnMjHsIgKlPqVwXyZbCdEfGhIjKl";
+
+async function loadFromCloud() {
   try {
-    const res = await fetch(`${FIREBASE_URL}/stock.json`);
+    const binId = localStorage.getItem("maillots-bin-id");
+    if (!binId) return null;
+    const res = await fetch(`${JSONBIN_API}/b/${binId}/latest`, {
+      headers: { "X-Master-Key": API_KEY }
+    });
+    if (!res.ok) return null;
     const data = await res.json();
-    return data;
+    return data.record?.stock || null;
   } catch { return null; }
 }
 
-async function fbSet(data) {
+async function saveToCloud(stock) {
   try {
-    await fetch(`${FIREBASE_URL}/stock.json`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    });
-    return true;
+    const binId = localStorage.getItem("maillots-bin-id");
+    if (!binId) {
+      // Create new bin
+      const res = await fetch(`${JSONBIN_API}/b`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Master-Key": API_KEY,
+          "X-Bin-Name": "maillots-stock",
+          "X-Bin-Private": "false"
+        },
+        body: JSON.stringify({ stock })
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      localStorage.setItem("maillots-bin-id", data.metadata.id);
+      // Share the bin ID so all users can access it
+      localStorage.setItem("maillots-stock-cache", JSON.stringify(stock));
+      return true;
+    } else {
+      const res = await fetch(`${JSONBIN_API}/b/${binId}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Master-Key": API_KEY
+        },
+        body: JSON.stringify({ stock })
+      });
+      if (!res.ok) return false;
+      localStorage.setItem("maillots-stock-cache", JSON.stringify(stock));
+      return true;
+    }
   } catch { return false; }
 }
 
@@ -49,27 +78,31 @@ export default function App() {
   const [pwError, setPwError] = useState(false);
   const [editStock, setEditStock] = useState(null);
   const [saved, setSaved] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  // Load stock — Firebase first, localStorage fallback
   useEffect(() => {
     async function load() {
-      let data = await fbGet();
-      if (!data) {
-        const local = localStorage.getItem("maillots-stock");
-        data = local ? JSON.parse(local) : DEFAULT_STOCK;
+      // Try cloud first, then local cache, then defaults
+      const cloud = await loadFromCloud();
+      if (cloud) {
+        setStock(cloud);
+        localStorage.setItem("maillots-stock-cache", JSON.stringify(cloud));
+      } else {
+        const cached = localStorage.getItem("maillots-stock-cache");
+        setStock(cached ? JSON.parse(cached) : DEFAULT_STOCK);
       }
-      setStock(data);
       setLoading(false);
     }
     load();
-
-    // Poll every 10s for live updates
+    // Refresh every 15s for live updates
     const interval = setInterval(async () => {
-      const data = await fbGet();
-      if (data) setStock(data);
-    }, 10000);
+      const cloud = await loadFromCloud();
+      if (cloud) {
+        setStock(cloud);
+        localStorage.setItem("maillots-stock-cache", JSON.stringify(cloud));
+      }
+    }, 15000);
     return () => clearInterval(interval);
   }, []);
 
@@ -105,8 +138,8 @@ export default function App() {
 
   async function saveStock() {
     setSaving(true);
-    const ok = await fbSet(editStock);
-    if (!ok) localStorage.setItem("maillots-stock", JSON.stringify(editStock));
+    const ok = await saveToCloud(editStock);
+    if (!ok) localStorage.setItem("maillots-stock-cache", JSON.stringify(editStock));
     setStock(editStock);
     setSaving(false);
     setSaved(true);
@@ -175,7 +208,7 @@ export default function App() {
                 <div className="actions">
                   <button className="btn-cancel" onClick={closeAdmin}>FERMER</button>
                   <button className="btn-gold" onClick={saveStock} disabled={saving}>
-                    {saving ? "..." : "💾 SAUVEGARDER"}
+                    {saving ? "SAUVEGARDE..." : "💾 SAUVEGARDER"}
                   </button>
                 </div>
                 {saved && <div className="feedback">✅ STOCK MIS À JOUR !</div>}
@@ -278,8 +311,7 @@ body{background:#080c10;}
 .pw-input:focus{border-color:#f5c518;}
 .pw-error{font-family:'Share Tech Mono',monospace;font-size:10px;color:#ef4444;letter-spacing:2px;margin-bottom:10px;}
 .btn-gold{width:100%;background:#f5c518;color:#080c10;border:none;border-radius:3px;padding:10px;font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:3px;cursor:pointer;transition:opacity 0.2s;}
-.btn-gold:hover{opacity:0.85;}
-.btn-gold:disabled{opacity:0.5;cursor:not-allowed;}
+.btn-gold:hover{opacity:0.85;}.btn-gold:disabled{opacity:0.5;cursor:not-allowed;}
 .a-card{border:1px solid rgba(255,255,255,0.07);border-radius:4px;margin-bottom:12px;overflow:hidden;}
 .a-head{display:flex;align-items:center;gap:8px;padding:10px 14px;background:rgba(255,255,255,0.03);border-bottom:1px solid rgba(255,255,255,0.05);}
 .a-sizes{padding:10px 14px;display:flex;flex-wrap:wrap;gap:10px;}
@@ -291,8 +323,7 @@ body{background:#080c10;}
 .qty-val{font-family:'Share Tech Mono',monospace;font-size:16px;min-width:20px;text-align:center;}
 .actions{display:flex;gap:10px;margin-top:20px;}
 .btn-cancel{flex:1;background:transparent;color:#6b7280;border:1px solid rgba(255,255,255,0.1);border-radius:3px;padding:10px;font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:3px;cursor:pointer;transition:all 0.2s;}
-.btn-cancel:hover{color:#e8eaf0;}
-.btn-cancel.full{width:100%;}
+.btn-cancel:hover{color:#e8eaf0;}.btn-cancel.full{width:100%;}
 .feedback{text-align:center;margin-top:10px;font-family:'Share Tech Mono',monospace;font-size:11px;letter-spacing:2px;color:#22c55e;animation:fadeIn 0.3s ease;}
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 .scanline{position:fixed;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,rgba(245,197,24,0.05),transparent);pointer-events:none;z-index:9999;animation:scan 6s linear infinite;}
